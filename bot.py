@@ -22,8 +22,9 @@ class Form(StatesGroup):
     supplier = State()
     invoice = State()
 
-cities = ["Апатиты", "Вологда", "Тагил", "Кировск", "Мурманск", "Санкт-Петербург"]
+cities = ["Апатиты", "Вологда", "Тагил", "Кировск", "Мурманск", "Санкт-Петербург", "Краснодар"]
 spb_points = ["Гороховая", "Ветеранов", "Восстания", "Комендантский", "Лето", "Невский"]
+krasnodar_points = ["Дзержинского, 95", "Гондаря, 99", "Колхозная 5/2"]
 
 
 bot = Bot(token=bot_token)
@@ -49,6 +50,12 @@ async def city_selected(callback: types.CallbackQuery, state: FSMContext):
         ] + [[types.InlineKeyboardButton(text="Назад", callback_data="back_city")]])
         await callback.message.edit_text("Выберите точку:", reply_markup=keyboard)
         await state.set_state(Form.point)
+    elif city == "Краснодар":
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text=point, callback_data=f"point_{point}")] for point in krasnodar_points
+        ] + [[types.InlineKeyboardButton(text="Назад", callback_data="back_city")]])
+        await callback.message.edit_text("Выберите точку:", reply_markup=keyboard)
+        await state.set_state(Form.point)
     else:
         await state.update_data(point=city)
         await select_date(callback.message, state)
@@ -65,7 +72,7 @@ async def select_date(message: types.Message, state: FSMContext):
     today = datetime.now()
     dates = [(today + timedelta(days=i)).strftime("%d.%m.%Y") for i in range(-2, 3)]
     options = dates + ["вне диапазона дат"]
-    back_callback = "back_point" if city == "Санкт-Петербург" else "back_city"
+    back_callback = "back_point" if city in ["Санкт-Петербург", "Краснодар"] else "back_city"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text=option, callback_data=f"date_{option}")] for option in options
     ] + [[types.InlineKeyboardButton(text="Назад", callback_data=back_callback)]])
@@ -152,9 +159,10 @@ async def back_to_city(callback: types.CallbackQuery, state: FSMContext):
 async def back_to_point(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     city = data.get("city")
-    if city == "Санкт-Петербург":
+    if city in ["Санкт-Петербург", "Краснодар"]:
+        points = spb_points if city == "Санкт-Петербург" else krasnodar_points
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text=point, callback_data=f"point_{point}")] for point in spb_points
+            [types.InlineKeyboardButton(text=point, callback_data=f"point_{point}")] for point in points
         ] + [[types.InlineKeyboardButton(text="Назад", callback_data="back_city")]])
         await callback.message.edit_text("Выберите точку:", reply_markup=keyboard)
         await state.set_state(Form.point)
