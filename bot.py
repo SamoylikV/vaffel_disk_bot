@@ -1,7 +1,12 @@
 import asyncio
 import os
+import requests
+import logging
+
 bot_token = os.getenv("BOT_TOKEN")
-yadisk_token = os.getenv("YADISK_TOKEN")
+bitrix_webhook = os.getenv("BITRIX_WEBHOOK_URL")
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 from datetime import datetime, timedelta
 
@@ -10,8 +15,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command, StateFilter
-
-import yadisk
 
 
 class Form(StatesGroup):
@@ -27,9 +30,50 @@ spb_points = ["Гороховая", "Ветеранов", "Восстания", 
 krasnodar_points = ["Дзержинского, 95", "Гондаря, 99", "Колхозная 5/2"]
 
 
+BASE_FOLDER_ID = 242069
+
+
+def get_subfolder_id(parent_id, name):
+    try:
+        response = requests.get(f"{bitrix_webhook}disk.folder.getchildren", params={'id': parent_id})
+        response.raise_for_status()
+        data = response.json()
+        if 'result' in data:
+            for item in data['result']:
+                if item['NAME'] == name and item['TYPE'] == 'folder':
+                    return item['ID']
+        return None
+    except requests.RequestException as e:
+        logging.error(f"Error getting subfolder '{name}': {e}")
+        return None
+
+
+def create_folder(parent_id, name):
+    try:
+        response = requests.post(f"{bitrix_webhook}disk.folder.addsubfolder", json={'id': parent_id, 'name': name})
+        response.raise_for_status()
+        data = response.json()
+        if 'result' in data:
+            return data['result']['ID']
+        return None
+    except requests.RequestException as e:
+        logging.error(f"Error creating folder '{name}': {e}")
+        return None
+
+def ensure_folder_path(base_id, *names):
+    current_id = base_id
+    for name in names:
+        folder_id = get_subfolder_id(current_id, name)
+        if folder_id is None:
+            folder_id = create_folder(current_id, name)
+        if folder_id is None:
+            return None
+        current_id = folder_id
+    return current_id
+
+
 bot = Bot(token=bot_token)
 dp = Dispatcher(storage=MemoryStorage())
-y = yadisk.YaDisk(token=yadisk_token)
 
 
 @dp.message(Command("start"))
@@ -70,7 +114,7 @@ async def select_date(message: types.Message, state: FSMContext):
     data = await state.get_data()
     city = data.get("city")
     today = datetime.now()
-    dates = [(today + timedelta(days=i)).strftime("%d.%m.%Y") for i in range(-2, 3)]
+    dates = [(today + timedelta(days=i)).strftime("%Y_%m_%d") for i in range(-2, 3)]
     options = dates + ["вне диапазона дат"]
     back_callback = "back_point" if city in ["Санкт-Петербург", "Краснодар"] else "back_city"
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -109,12 +153,6 @@ async def supplier_entered(message: types.Message, state: FSMContext):
     await message.answer("Введите номер накладной:")
     await state.set_state(Form.invoice)
 
-def ensure_folder(path: str):
-    full = f"disk:{path}"
-    if not y.exists(full):
-        y.mkdir(full)
-
-
 @dp.message(StateFilter(Form.invoice))
 async def invoice_entered(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -124,11 +162,11 @@ async def invoice_entered(message: types.Message, state: FSMContext):
     point = data["point"]
     date = data["date"]
 
-    ensure_folder(f"/{city}")
-    ensure_folder(f"/{city}/{point}")
-    ensure_folder(f"/{city}/{point}/{date}")
-
-    target_dir = f"disk:/{city}/{point}/{date}"
+    target_folder_id = ensure_folder_path(BASE_FOLDER_ID, city, point, date)
+    if target_folder_id is None:
+        await message.answer("Ошибка при создании папки.")
+        await state.clear()
+        return
 
     for i, file_id in enumerate(data["photos"], 1):
         file = await bot.get_file(file_id)
@@ -138,9 +176,28 @@ async def invoice_entered(message: types.Message, state: FSMContext):
         with open(filename, "wb") as f:
             await bot.download_file(file_path, f)
 
-        y.upload(filename, f"{target_dir}/{filename}")
-        os.remove(filename)
+        try:
+            r = requests.post(f"{bitrix_webhook}disk.folder.uploadfile", json={"id": target_folder_id, "fileName": filename})
+            r.raise_for_status()
+            upload_info = r.json()
+            upload_url = upload_info.get("result", {}).get("uploadUrl")
+            if not upload_url:
+                logging.error(f"Failed to get upload URL for {filename}")
+                continue
 
+            with open(filename, "rb") as f_upload:
+                requests.post(upload_url, files={"file": f_upload}).raise_for_status()
+
+        except requests.RequestException as e:
+            logging.error(f"Error uploading {filename}: {e}")
+        finally:
+            os.remove(filename)
+
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="Начать заново", callback_data="restart")]
+    ])
+    await message.answer("Все фото загружены.", reply_markup=keyboard)
+    await state.clear()
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="Начать заново", callback_data="restart")]
     ])
