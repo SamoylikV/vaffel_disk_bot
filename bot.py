@@ -34,41 +34,49 @@ BASE_FOLDER_ID = 242069
 
 
 def get_subfolder_id(parent_id, name):
-    try:
-        response = requests.get(f"{bitrix_webhook}disk.folder.getchildren", params={'id': parent_id})
-        response.raise_for_status()
-        data = response.json()
-        if 'result' in data:
-            for item in data['result']:
-                if item['NAME'] == name and item['TYPE'] == 'folder':
-                    return item['ID']
-        return None
-    except requests.RequestException as e:
-        logging.error(f"Error getting subfolder '{name}': {e}")
-        return None
+    response = requests.get(
+        f"{bitrix_webhook}disk.folder.getchildren",
+        params={"id": parent_id},
+    )
+    response.raise_for_status()
+
+    for item in response.json().get("result", []):
+        if item["TYPE"] == "folder" and item["NAME"] == name:
+            return item["ID"]
+
+    return None
+
 
 
 def create_folder(parent_id, name):
-    try:
-        response = requests.post(f"{bitrix_webhook}disk.folder.addsubfolder", json={'id': parent_id, 'name': name})
-        response.raise_for_status()
-        data = response.json()
-        if 'result' in data:
-            return data['result']['ID']
+    response = requests.post(
+        f"{bitrix_webhook}disk.folder.addsubfolder",
+        json={"id": parent_id, "name": name},
+    )
+
+    if response.status_code == 400:
         return None
-    except requests.RequestException as e:
-        logging.error(f"Error creating folder '{name}': {e}")
-        return None
+
+    response.raise_for_status()
+    return response.json()["result"]["ID"]
 
 def ensure_folder_path(base_id, *names):
     current_id = base_id
+
     for name in names:
         folder_id = get_subfolder_id(current_id, name)
+
         if folder_id is None:
             folder_id = create_folder(current_id, name)
+
+            if folder_id is None:
+                folder_id = get_subfolder_id(current_id, name)
+
         if folder_id is None:
             return None
+
         current_id = folder_id
+
     return current_id
 
 
@@ -107,6 +115,7 @@ async def city_selected(callback: types.CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("point_"))
 async def point_selected(callback: types.CallbackQuery, state: FSMContext):
     point = callback.data.split("_", 1)[1]
+    logging.info(f"Point selected: {point}")
     await state.update_data(point=point)
     await select_date(callback.message, state)
 
@@ -120,7 +129,9 @@ async def select_date(message: types.Message, state: FSMContext):
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text=option, callback_data=f"date_{option}")] for option in options
     ] + [[types.InlineKeyboardButton(text="Назад", callback_data=back_callback)]])
-    await message.edit_text("Выберите дату:", reply_markup=keyboard)
+    new_text = "Выберите дату:"
+    if message.text != new_text or message.reply_markup != keyboard:
+        await message.edit_text(new_text, reply_markup=keyboard)
     await state.set_state(Form.date)
 
 @dp.callback_query(F.data.startswith("date_"))
