@@ -4,7 +4,7 @@ import requests
 import logging
 
 bot_token = os.getenv("BOT_TOKEN")
-bitrix_webhook = os.getenv("BITRIX_WEBHOOK_URL")
+BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -33,51 +33,51 @@ krasnodar_points = ["Дзержинского, 95", "Гондаря, 99", "Ко�
 BASE_FOLDER_ID = 242069
 
 
-def get_subfolder_id(parent_id, name):
-    response = requests.get(
-        f"{bitrix_webhook}disk.folder.getchildren",
-        params={"id": parent_id},
+def get_children(folder_id):
+    r = requests.get(
+        f"{BITRIX_WEBHOOK}disk.folder.getchildren",
+        params={"id": str(folder_id)},
     )
-    response.raise_for_status()
+    r.raise_for_status()
+    return r.json().get("result", [])
 
-    for item in response.json().get("result", []):
+
+def find_folder(parent_id, name):
+    for item in get_children(parent_id):
         if item["TYPE"] == "folder" and item["NAME"] == name:
             return item["ID"]
-
     return None
 
 
-
 def create_folder(parent_id, name):
-    response = requests.post(
-        f"{bitrix_webhook}disk.folder.addsubfolder",
-        json={"id": parent_id, "name": name},
+    r = requests.post(
+        f"{BITRIX_WEBHOOK}disk.folder.addsubfolder",
+        data={"id": str(parent_id), "data[NAME]": name},
     )
+    r.raise_for_status()
+    return r.json()["result"]["ID"]
 
-    if response.status_code == 400:
-        return None
-
-    response.raise_for_status()
-    return response.json()["result"]["ID"]
 
 def ensure_folder_path(base_id, *names):
     current_id = base_id
-
     for name in names:
-        folder_id = get_subfolder_id(current_id, name)
-
+        folder_id = find_folder(current_id, name)
         if folder_id is None:
             folder_id = create_folder(current_id, name)
-
-            if folder_id is None:
-                folder_id = get_subfolder_id(current_id, name)
-
-        if folder_id is None:
-            return None
-
         current_id = folder_id
-
     return current_id
+
+
+def upload_file(folder_id, filepath):
+    filename = os.path.basename(filepath)
+    r = requests.post(
+        f"{BITRIX_WEBHOOK}disk.folder.uploadfile",
+        data={"id": str(folder_id), "fileName": filename},
+    )
+    r.raise_for_status()
+    upload_url = r.json()["result"]["uploadUrl"]
+    with open(filepath, "rb") as f:
+        requests.post(upload_url, files={"file": f}).raise_for_status()
 
 
 bot = Bot(token=bot_token)
@@ -188,19 +188,9 @@ async def invoice_entered(message: types.Message, state: FSMContext):
             await bot.download_file(file_path, f)
 
         try:
-            r = requests.post(f"{bitrix_webhook}disk.folder.uploadfile", json={"id": target_folder_id, "fileName": filename})
-            r.raise_for_status()
-            upload_info = r.json()
-            upload_url = upload_info.get("result", {}).get("uploadUrl")
-            if not upload_url:
-                logging.error(f"Failed to get upload URL for {filename}")
-                continue
-
-            with open(filename, "rb") as f_upload:
-                requests.post(upload_url, files={"file": f_upload}).raise_for_status()
-
-        except requests.RequestException as e:
-            logging.error(f"Error uploading {filename}: {e}")
+            upload_file(target_folder_id, filename)
+        except Exception as e:
+            logging.error(f"Ошибка загрузки {filename}: {e}")
         finally:
             os.remove(filename)
 
